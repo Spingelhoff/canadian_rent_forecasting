@@ -1,0 +1,348 @@
+---
+title: "Investigating the Determinants of Rent in Canadian Provinces"
+format:
+  html:
+    theme: lux
+    toc: TRUE
+    toc-depth: 4
+    code-fold: TRUE
+---
+
+```{r include = FALSE}
+library(tidyr)
+library(dplyr)
+library(lubridate)
+library(ggdag)
+library(fixest)
+library(ggplot2)
+
+all_data <- read.csv("rent_model_all_data.csv")
+```
+
+## Introduction
+
+Soaring rent prices across Canada have piqued my interest in understanding the key factors that influence them. Gaining a deeper understanding of these determinants would empower me to make more informed decisions when evaluating economic indicators related to rent.
+
+To delve into this issue, I adopted a theoretical foundation, constructing a causal model. Leveraging data from the Canada Mortgage and Housing Corporation (CMHC) and Statistics Canada, I employed linear regression with fixed effects for province and year. This approach allowed me to isolate and measure the independent effects of various factors on rent prices.
+
+## Results
+
+### Causal Model
+
+My analysis employed a causal model to investigate the factors influencing rent prices in Canada. This model proposes that rent prices are a consequence of three primary forces: supply, demand, and costs.
+
+#### Supply
+
+Supply reflects the availability and overall capacity of the rental market. I captured supply through two key variables. The first is vacancy rate, which indicates the percentage of rental units that are currently unoccupied. A higher vacancy rate signifies greater availability and potentially lower rent prices. The second variable is total rental units, which represents the total number of rental units available in a given location. A larger number of units suggests a more robust rental market supply, potentially lowering rent prices.
+
+#### Demand
+
+Demand reflects the pressure on rental units created by potential renters. I utilized two variables to capture demand. Population growth signifies an increase in the number of potential renters, potentially driving up demand and rent prices. The second variable is average wage, which serves as a proxy for renters' spending power. Higher average wages suggest that renters may be able to afford higher rents. My model assumes a relatively stable ratio of renters to non-renters in the population.
+
+#### Cost
+
+Costs represent the ongoing operational expenses undertaken by landlords, which can influence how they price their rentals. I captured costs through two variables. The first is mortgage burden, which reflects the relative cost of mortgage payments for landlords. I adjusted the mortgage interest paid by both the Consumer Price Index (CPI) and population to account for inflation and population growth. A higher mortgage burden could incentivize landlords to raise rents. The second variable is rental property expenses, which represent the cost of utilities (specifically, water and electricity) associated with maintaining a rental property. These are considered significant ongoing expenses for landlords.
+
+#### Location
+
+Location is an important factor that significantly influences rent prices. However, location specific effects are challenging to quantify directly within my model. I believe that location likely exerts an indirect influence on all three main categories identified: supply, demand, and costs. For example, desirable locations with limited land availability might have a lower vacancy rate and higher total rental unit costs, impacting both supply and costs. Similarly, location might influence population growth patterns and average wages, affecting demand.
+
+#### Model Diagram
+
+The following diagram is a representation of the causal model presented above:
+
+```{r}
+dagify(
+  rent_price ~ supply + demand + cost,
+  supply ~ vacancy + rental_supply + location,
+  vacancy ~ location,
+  rental_supply ~ location,
+  demand ~ population + avg_hourly_wage + location,
+  population ~ location,
+  avg_hourly_wage ~ location,
+  cost ~ mortgage + electricity + water + location,
+  mortgage ~ location,
+  electricity ~ location,
+  water ~ location,
+  outcome = "rent_price",
+  labels = c(
+    rent_price = "rent price",
+    supply = "supply",
+    demand = "demand",
+    cost = "cost",
+    vacancy = "vacancy",
+    rental_supply = "rental supply",
+    population = "population",
+    avg_hourly_wage = "average wage",
+    mortgage = "mortgage",
+    water = "water",
+    electricity = "electricity",
+    location = "location"
+  ),
+  coords = list(
+    x = c(rent_price = 4, supply = 3, demand = 3, cost = 3, vacancy = 2, 
+          rental_supply = 2, population = 2, avg_hourly_wage = 2, mortgage = 2, 
+          water = 2, electricity = 2, location = 1),
+    y = c(rent_price = 4, supply = 1, demand = 4, cost = 7, vacancy = 1,
+          rental_supply = 2, population = 3, avg_hourly_wage = 5, mortgage = 6, 
+          water = 7, electricity = 8, location = 4)
+  )
+) |>
+ggdag_status(
+  use_labels = "label", 
+  text = FALSE,
+) + 
+  theme_dag()
+```
+
+### Regression Analysis
+
+#### Full Causal Rent Model
+
+I employed ordinary least squares (OLS) regression to investigate how the proposed rental market factors influence rent prices. To account for the influence of location that cannot be directly measured in my model, I fixed the regression on province. Additionally, year was included as a fixed effect to control for any time-varying factors that might affect rent prices. Furthermore, standard errors were clustered on both province and year for robust estimation.
+
+```{r}
+causal_data_full <- all_data |>
+  filter(
+    room_type == "all",
+    year < 2023
+  ) |>
+  select(
+    year,
+    geography,
+    avg_rent_cpi_adj,
+    mortgage_interest_paid_cpi_pop_adj,
+    electricity_index,
+    water_index,
+    population,
+    avg_hourly_wage,
+    vacancy_rate,
+    rental_supply
+  )
+
+causal_model_full <- feols(
+  log(avg_rent_cpi_adj) ~ 
+    log(mortgage_interest_paid_cpi_pop_adj) + log(population) +
+    vacancy_rate + log(rental_supply) + log(avg_hourly_wage) +
+    log(electricity_index) + log(water_index) | year + geography,
+  data = causal_data_full
+)
+
+etable(causal_model_full, se = "twoway")
+```
+
+The analysis revealed that population growth had the strongest effect on rent prices. Surprisingly, the vacancy rate was not statistically significant implying that vacancy rate might not be a strong predictor of rent prices in my model. Additionally, both total rental units (representing supply) and population (representing demand) showed positive effects on rent price. Finally, the cost of water exhibited a negligible effect on rent price in terms of both magnitude and significance.
+
+#### Time Lagged Causal Rent Model
+
+Recognizing that the rental market may respond to economic factors with a delay, I implemented the same model using regressors lagged by one year. This allowed me to explore whether the effects of these factors take time to unfold and influence rent prices.
+
+```{r}
+causal_data_lagged <- all_data |>
+  filter(room_type == "all") |>
+  group_by(
+    geography
+  ) |>
+  mutate(
+    lagged_mortgage_interest_paid_cpi_pop_adj = lag(mortgage_interest_paid_cpi_pop_adj, 1),
+    lagged_population = lag(population, 1),
+    lagged_vacancy_rate = lag(vacancy_rate, 1),
+    lagged_rental_supply = lag(rental_supply, 1),
+    lagged_avg_hourly_wage = lag(avg_hourly_wage, 1),
+    lagged_electricity_index = lag(electricity_index, 1),
+    lagged_water_index = lag(water_index, 1)
+  ) |>
+  ungroup() |>
+  select(
+    year,
+    geography,
+    avg_rent_cpi_adj,
+    contains("lagged")
+  ) |>
+  filter(year > 2001)
+
+causal_model_lagged <- feols(
+  log(avg_rent_cpi_adj) ~ 
+    log(lagged_mortgage_interest_paid_cpi_pop_adj) + log(lagged_population) +
+    lagged_vacancy_rate + log(lagged_rental_supply) + log(lagged_avg_hourly_wage) +
+    log(lagged_electricity_index) + log(lagged_water_index) | year + geography,
+  data = causal_data_lagged
+)
+
+etable(causal_model_lagged, se = "twoway")
+```
+
+The lagged model revealed some interesting findings. Wages exhibited the largest effect size, suggesting that wage growth might have a stronger influence on rent prices with a one-year lag. Notably, the vacancy rate, which was insignificant in the standard model, showed some level of significance in the lagged model. This suggests that changes in vacancy rates might have a delayed impact on rent prices.
+
+Interestingly, both the within and adjusted R-squared values were higher in the lagged model compared to the standard model. This indicates that the lagged model might explain a slightly larger portion of the variance in rent prices.
+
+#### Residual Analysis
+
+To evaluate the performance of the standard and time-lagged causal rent models, a comprehensive residual analysis was conducted. Initial investigations focused on the distribution of standardized residuals for both models. While both distributions exhibited approximate normality, a slight positive skew was observed in each. Visual comparisons did not reveal substantial differences between the residual distributions.
+
+```{r}
+#| warning: false
+#| messages: true
+
+get_fitted_and_residuals <- function(x, y) {
+  tibble(
+    id = 1:length(residuals(x)),
+    model = y,
+    residuals = residuals(x),
+    standardized_residuals = residuals(x) / sigma(x),
+    rescaled_residuals = sqrt(abs(standardized_residuals)),
+    fitted = fitted(x)
+  )
+}
+
+causal_model_list <- list(
+  causal_model_full = causal_model_full,
+  causal_model_lagged = causal_model_lagged
+)
+
+models_residuals <- mapply(
+  get_fitted_and_residuals,
+  x = causal_model_list,
+  y = names(causal_model_list),
+  SIMPLIFY = FALSE
+) |>
+  bind_rows()
+
+ggplot(models_residuals, aes(x = standardized_residuals)) +
+  geom_histogram() +
+  facet_wrap(~model)
+```
+
+To further scrutinize residual normality, Q-Q plots were generated. These plots provided a clearer distinction between the models. The standard model demonstrated a closer adherence to the theoretical normal distribution compared to the lagged model. The latter exhibited more pronounced deviations, especially in the tails of the distribution.
+
+```{r}
+ggplot(models_residuals, aes(sample = standardized_residuals)) +
+  geom_qq() +
+  geom_qq_line() +
+  facet_wrap(vars(model))
+```
+
+The independence of errors was assessed by examining the relationship between fitted values and residuals for both models. The presence of a non-linear trend in both scatterplots indicated a violation of the assumption of independent errors.
+
+```{r}
+#| warning: false
+#| messages: true
+
+ggplot(models_residuals, aes(x = fitted, y = residuals)) +
+  geom_point() +
+  geom_smooth() +
+  facet_wrap(vars(model))
+```
+
+Homoscedasticity, or the constant variance of errors, was investigated using scale-location plots. Although neither model perfectly met the assumption of homoscedasticity, as evidenced by deviations from the expected uniform mean trend, the observed variance did not appear excessively large.
+
+```{r}
+#| warning: false
+#| messages: true
+
+ggplot(models_residuals, aes(x = fitted, y = rescaled_residuals)) +
+  geom_point() +
+  geom_smooth() +
+  facet_wrap(vars(model))
+```
+
+Finally, a visual comparison of the model fits was undertaken. The lagged model exhibited a superior fit, particularly during periods of rent price reversal, such as in Alberta during later years. This observation aligns with the higher R-squared value associated with the lagged model.
+
+```{r}
+display_fit <- function(model, title) {
+  fixest_data(model) |>
+    mutate(
+      fitted_values = fitted(model)
+    ) |>
+    select(
+      year,
+      geography,
+      avg_rent_cpi_adj,
+      fitted_values
+    ) |>
+    ggplot(aes(x = year, y = avg_rent_cpi_adj)) +
+    geom_line(color = "grey") +
+    geom_line(mapping = aes(x = year, 
+                            y = exp(fitted_values)),
+              linetype = "dotted") +
+    facet_wrap(~geography) +
+    labs(title = {{ title }})
+}
+
+display_fit(causal_model_full, title = "Full Model Fit")
+display_fit(causal_model_lagged, title = "Lagged Model Fit")
+```
+
+#### Model Selection
+
+The lagged causal rent model demonstrated superior performance compared to the standard model. This superiority is evidenced by a higher R-squared value and a more visually compelling fit to the data trends. Although the residual distribution for the lagged model exhibited some skewness, the deviation from normality was not severe. Intuitively, the lagged model aligns with the expectation that landlords require time to adjust rental prices in response to fluctuations in market conditions.
+
+#### Refining Selected Model
+
+Water costs was found to have an insignificant impact on rent prices within the lagged model. This suggests that the water costs may not be a crucial determinant of rental costs. To formally assess the significance of water costs, a Wald test was conducted. The results of the Wald test confirmed the insignificance of water costs. Consequently, the water index variable was removed from the model, and the model was re-estimated. 
+
+```{r}
+wald(causal_model_lagged, "lagged_water_index", vcov = "twoway")
+```
+
+The final model fit is presented below.
+
+```{r}
+revised_lagged_model <- feols(
+    log(avg_rent_cpi_adj) ~ 
+    log(lagged_mortgage_interest_paid_cpi_pop_adj) + 
+    log(lagged_population) + lagged_vacancy_rate + 
+    log(lagged_rental_supply) + 
+    log(lagged_avg_hourly_wage) +
+    log(lagged_electricity_index) | year + geography,
+    data = causal_data_lagged
+)
+
+summary(revised_lagged_model, vcov = "twoway")
+
+display_fit(revised_lagged_model, title = "Revised Model Fit")
+```
+
+## Discussion
+
+### Model Comparison
+
+This study compared two causal rent models: a standard model assuming a direct impact of economic factors on rent prices and a lagged model incorporating a potential one-year delay in the rental market's response. I evaluated both models based on their fit to the data, residual diagnostics, and the significance of their coefficients.
+
+Model fit, as measured by R-squared, indicated minimal differences between the two models, with the lagged model showing slightly better performance. However, the residual analysis revealed a potential issue with the lagged model. While the deviation from normality in the residual distribution was not severe, it was more pronounced compared to the standard model. Other residual diagnostics did not present major concerns.
+
+Despite the normality issue in the residuals, the lagged model's superior fit to the data led me to select it for further analysis. This suggests that economic factors likely influence rent prices with a time lag rather than instantaneously in the context of my data.
+
+### Rent Determinants Analysis
+
+The initial rent model analysis provides valuable insights into the factors influencing rent prices in Canada. Six variables emerged as statistically significant determinants of rent prices: mortgage interest paid, population growth, rental supply, vacancy rate, average wage, and electricity index. Notably, water costs were found to be statistically insignificant and were subsequently removed from the model. While this finding suggests water costs may have a minimal impact on Canadian rent prices, it is essential to acknowledge the potential limitations of a relatively small sample size (220 observations), which might have influenced the results.
+
+As anticipated, mortgage interest paid, population growth, and electricity costs exhibited positive relationships with rent prices. These findings align with the expectation that increased demand, represented by population growth, and higher operating costs, such as those associated with mortgage interest and electricity, exert upward pressure on rental rates. Conversely, the negative relationship between vacancy rate and rent price confirms the theoretical expectation that higher vacancy rates lead to lower rental prices as landlords compete for tenants.
+
+However, the positive relationship between rental supply and rent price contradicts the traditional economic model, which posits an inverse relationship between supply and price. This unexpected finding warrants further investigation. One possible explanation is a time lag in the adjustment of rental supply to changes in demand, particularly within Canada's rapidly evolving housing market. It is plausible that the data captures a period of imbalance where rental supply has not yet caught up with surging demand, resulting in a temporary positive correlation. To gain a more comprehensive understanding of the relationship between rental supply and rent prices, further analysis with a larger dataset or a more specific timeframe is recommended.
+
+## Methods
+
+### Data
+
+Data for this analysis was retrieved from the CMHC and Statistics Canada APIs using the *cmhc* and *statcan* R packages. To facilitate modeling, the data was aggregated to a yearly format, condensing or summarizing any relevant variables.
+
+I employed factor-specific transformations where necessary. Rent prices were adjusted for inflation using the Consumer Price Index (CPI). Similarly, mortgage interest paid was adjusted by both CPI and population to account for inflation and population growth, resulting in a relative measure of the mortgage burden on landlords.
+
+To investigate potential time-delayed effects, I created a separate dataset for a time-lagged rent model. In this dataset, all independent variables were lagged by one year.
+
+### Model Estimation
+
+Models were estimated using the *fixest* package in R.
+
+## Citations
+
+Barrett M (2024). *ggdag: Analyze and Create Elegant Directed Acyclic Graphs*. R package version 0.2.12, <https://CRAN.R-project.org/package=ggdag>.
+
+Berge L (2018). "Efficient estimation of maximum likelihood models with multiple fixed-effects: the R package FENmlm." CREA Discussion Papers.
+
+von Bergmann and Shkolnik (2021). cansim: Accessing Statistics Canada Data Table and Vectors. https://CRAN.R-project.org/package=cansim
+
+von Bergmann J (2023). *cmhc: Access, Retrieve, and Work with CMHC Data*. R package version 0.2.7, <https://CRAN.R-project.org/package=cmhc>.
+
+Wickham H, Averick M, Bryan J, Chang W, McGowan LD, François R, Grolemund G, Hayes A, Henry L, Hester J, Kuhn M, Pedersen TL, Miller E, Bache SM, Müller K, Ooms J, Robinson D, Seidel DP, Spinu V, Takahashi K, Vaughan D, Wilke C, Woo K, Yutani H (2019). “Welcome to the tidyverse.” *Journal of Open Source Software*, *4*(43), 1686. doi:10.21105/joss.01686 <https://doi.org/10.21105/joss.01686>.

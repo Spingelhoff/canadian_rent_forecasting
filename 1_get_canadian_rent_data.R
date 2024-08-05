@@ -41,11 +41,23 @@ get_statcan_provincial_data <- function(provincial_sgc_list, from) {
       geography %in% province_list
     )
   
+  mortgage_interest_data <- get_cansim("36-10-0226-01") |> #Yearly, 1981-2022, Provincial
+    filter(
+      year(Date) > 2000,
+      Estimates == "Mortgage interest paid",
+      GEO %in% province_list
+    ) |>
+    select(
+      date = Date,
+      geography = GEO,
+      "mortgage_interest_paid" = val_norm,
+    )
+  
   consumer_price_index_data <- get_cansim("18-10-0004-01") |> #Monthly, 1914-present, Provincial, UOM 2002 = 100
     filter(
       year(Date) > from,
-      `Products and product groups` %in% c("Energy", "All-items excluding energy", "All-items"),
-      GEO %in% province_list
+      `Products and product groups` %in% c("Energy", "All-items excluding energy", "All-items", "Water", "Electricity"),
+      GEO %in% c(province_list),
     ) |>
     select(
       date = Date,
@@ -60,7 +72,9 @@ get_statcan_provincial_data <- function(provincial_sgc_list, from) {
     rename(
       consumer_price_index = `All-items`,
       energy_consumer_index = Energy,
-      excluding_energy_consumer_index = `All-items excluding energy`
+      excluding_energy_consumer_index = `All-items excluding energy`,
+      water_index = Water,
+      electricity_index = Electricity 
     )
   
   # Immigration Data 
@@ -129,6 +143,7 @@ get_statcan_provincial_data <- function(provincial_sgc_list, from) {
   all_data_list <- list(
     housing_price_index_data,
     consumer_price_index_data,
+    mortgage_interest_data,
     international_migration_data,
     avg_hourly_wage_data,
     provincial_pop_estimates_data,
